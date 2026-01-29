@@ -749,6 +749,27 @@ google-auth-oauthlib = ">=0.7.1"
 pandas = ["pandas (>=0.14.0)"]
 
 [[package]]
+name = "pymediainfo"
+version = "7.0.1"
+description = "A Python wrapper for the MediaInfo library."
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "pymediainfo-7.0.1-py3-none-macosx_10_10_universal2.whl", hash = "sha256:286f3bf6299be0997093254e0f371855bc5cf2aaf8641d19455a011e3ee3a84d"},
+    {file = "pymediainfo-7.0.1-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:3648e2379fa67bd02433d1e28c707df3a53834dd480680615a9fefd2266f1182"},
+    {file = "pymediainfo-7.0.1-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:cde98112f1ce486589b17a12e5da42085faea996224f7c67fa45b8c1dca719c6"},
+    {file = "pymediainfo-7.0.1-py3-none-win32.whl", hash = "sha256:01bcaf82b72cefbf4b96f13b2547e1b2e0e734bab7173d7c33f7f01acc07c98b"},
+    {file = "pymediainfo-7.0.1-py3-none-win_amd64.whl", hash = "sha256:13224fa7590e198763b8baf072e704ea81d334e71aa32a469091460e243893c7"},
+    {file = "pymediainfo-7.0.1.tar.gz", hash = "sha256:0d5df59ecc615e24c56f303b8f651579c6accab7265715e5d429186d7ba21514"},
+]
+
+[package.extras]
+dev = ["black", "flake8", "ipython", "isort", "mypy (>=1.0)", "pylint"]
+docs = ["alabaster", "myst-parser", "setuptools_scm", "sphinx"]
+tests = ["pytest (>=6)", "pytest-cov", "pytest-xdist"]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 description = "pyparsing - Classes and methods to define and execute parsing grammars"
@@ -908,4 +929,4 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13"
-content-hash = "69f09838d0ab8ba97f0de97433ab07c1df083cd9f8feb40f235f28458df2e964"
+content-hash = "bbadb5ce5f8d5c1cd0250d6f4b1fa36922dca5e762f9708c7d0af8444fbfd301"

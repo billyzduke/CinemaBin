@@ -3,13 +3,20 @@ import re
 import unicodedata
 from pymediainfo import MediaInfo
 
-def normalize_unicode(s, form='NFC'):
-  """
-  Converts NFD (Mac style) to NFC (Web style) so names match.
-  """
-  if not isinstance(s, str):
-    s = str(s)
-  return unicodedata.normalize(form, s)
+def decode_safe_filename(filename):
+  if not filename:
+    return ""
+  
+  filename = filename.replace('·', '.')
+  filename = filename.replace('_', ' ')
+  filename = filename.replace('+', ', ')
+  filename = filename.replace('¿', '?')
+  filename = filename.replace('--', '/')
+  filename = filename.replace('±', '*')
+  filename = filename.replace('÷', ': ')
+  filename = filename.replace("''", '"')
+  filename = filename.replace('&', ' & ')
+  return filename.strip()
 
 def get_video_details(filepath):
   media_info = MediaInfo.parse(filepath)
@@ -22,9 +29,19 @@ def get_video_details(filepath):
       }
   return None
 
+def normalize_unicode(s, form='NFC'):
+  """
+  Converts NFD (Mac style) to NFC (Web style) so names match.
+  """
+  if not isinstance(s, str):
+    s = str(s)
+  return unicodedata.normalize(form, s)
+
 def parse_filename(filename):
   base_name, extension = os.path.splitext(filename)
-  parts = base_name.split('-')
+  base_name = decode_safe_filename(base_name)
+
+  raw_parts = base_name.split('-')
 
   # --- 0. CLEAN SPLIT TOKENS (NEW STEP) ---
   # Remove things like "1_of_2", "cd1", "part1" so they don't corrupt metadata
@@ -99,44 +116,68 @@ def parse_filename(filename):
     "Audio": "",
     "Bit Depth": ""
   }
-
-  # Updated Codec Pattern: Matches h264/5 AND xvid (case insensitive)
-  pat_codec = re.compile(r'^(h[\.\-_]?26[45]|xvid)$', re.IGNORECASE)
   
-  pat_audio = re.compile(r'^(AAC|AC|DD|DDP|DTS|TrueHD|FLAC|MP3|PCM).*', re.IGNORECASE)
-  pat_bitrate = re.compile(r'.*(bit|bps)$', re.IGNORECASE)
+  # Regex Definitions
+  pat_codec    = re.compile(r'^(h[\.\-_]?26[45]|xvid|avc)$', re.IGNORECASE)
+  pat_audio    = re.compile(r'^(AAC|AC|DD|DDP|DTS|TrueHD|FLAC|MP3|PCM|Opus).*', re.IGNORECASE)
+  pat_channels = re.compile(r'^(\d+)ch$', re.IGNORECASE)
+  pat_bitdepth = re.compile(r'^\d+bit$', re.IGNORECASE) # Matches "10bit"
+
+  # Temporary holders to avoid overwriting
+  found_audio_codec = ""
+  found_audio_channels = ""
 
   for tag in bag_of_tags:
-    clean_tag = tag.replace('·', '.')
+    lower_tag = tag.lower()
 
-    if pat_codec.match(clean_tag):
-      lower_tag = clean_tag.lower()
-      
-      # Normalize XVID to uppercase
+    # A. CODEC
+    if pat_codec.match(lower_tag):
       if "xvid" in lower_tag:
         data["Codec"] = "XVID"
-      # Normalize H.265/x265 to lowercase x265
       elif "265" in lower_tag:
         data["Codec"] = "x265"
-      # Default the rest to lowercase x264
       else:
-        data["Codec"] = "x264"
-        
-    elif pat_bitrate.match(clean_tag):
-      data["Bit Depth"] = clean_tag.replace('bit', '').strip()
-      
-    elif pat_audio.match(clean_tag):
-      data["Audio"] = clean_tag
+        data["Codec"] = "x264" # Normalizes h264, avc, etc.
+
+    # B. BIT DEPTH (Video)
+    elif pat_bitdepth.match(lower_tag):
+      data["Bit Depth"] = lower_tag.replace('bit', '').strip()
+
+    # C. AUDIO CODEC (e.g. AAC, DTS)
+    elif pat_audio.match(lower_tag):
+      found_audio_codec = lower_tag
+
+    # D. AUDIO CHANNELS (e.g. 6CH, 2CH)
+    elif pat_channels.match(lower_tag):
+      ch_num = int(pat_channels.match(lower_tag).group(1))
+      if ch_num == 6:
+        found_audio_channels = "5.1"
+      elif ch_num == 8:
+        found_audio_channels = "7.1"
+      elif ch_num == 2:
+        found_audio_channels = "2.0"
+      elif ch_num == 1:
+        found_audio_channels = "1.0"
+
+  # --- MERGE AUDIO LOGIC ---
+  # Combine codec and channels (e.g., "AAC" + "5.1" -> "AAC 5.1")
+  # Check if codec string already has the channel info (e.g. "DD5.1") to avoid "DD5.1 5.1"
+  if found_audio_channels and (found_audio_channels not in found_audio_codec):
+    data["Audio"] = f"{found_audio_codec} {found_audio_channels}".strip()
+  else:
+    data["Audio"] = found_audio_codec
 
   # --- 5. TRANSLATE EDITION CODES ---
   edition_map = {
-    "EX": "Extended",
-    "UR": "Unrated",
-    "UC": "Uncut",
+    "CC": "Criterion Collection",
     "DC": "Director's Cut",
+    "EX": "Extended",
+    "FC": "Final Cut",
+    "FE": "Fan Edit",
     "RM": "Remastered",
     "SE": "Special Edition",
-    "FC": "Final Cut"
+    "UR": "Unrated",
+    "UC": "Uncut",
   }
   
   clean_edition = edition_map.get(edition, edition)
@@ -149,33 +190,29 @@ def parse_filename(filename):
     "Format": extension.lstrip('.'),
     **data
   }
-# --- 5. TRANSLATE EDITION CODES ---
-  edition_map = {
-    "EX": "Extended",
-    "UR": "Unrated",
-    "UC": "Uncut",
-    "DC": "Director's Cut",
-    "RM": "Remastered",
-    "SE": "Special Edition", # Added for good measure
-    "FC": "Final Cut"        # Added for good measure
-  }
-  
-  # Translate if found, otherwise keep original code (e.g. "DC" -> "Director's Cut")
-  clean_edition = edition_map.get(edition, edition)
 
-  return {
-    "Title": "-".join(parts[:title_end]).replace("_", " "),
-    "Year": parts[year_index],
-    "Edition": clean_edition,  # Use the translated value here
-    "Director": "-".join(director_parts).replace("_", " "),
-    "Format": extension.lstrip('.'),
-    **data
-  }
+def remove_value_from_list(arr, value):
+  """
+  Removes all occurrences of 'value' from the list 'arr'.
+  Returns the updated list.
+  """
+  if not isinstance(arr, list):
+    #raise TypeError("arr must be a list")
+    return arr
 
-# Convert string to integer safely in Python
+  # Check if value exists
+  if value not in arr:
+    #print(f"Value '{value}' not found in list.")
+    return arr
+
+  # Remove all occurrences
+  arr = [item for item in arr if item != value]
+  #print(f"Value '{value}' removed successfully.")
+  return arr
+
 def safe_str_to_int(s, return_on_fail=None):
   """
-  Converts a string to an integer with error handling.
+  Convert string to integer safely in Python with error handling.
   Returns the integer if successful, or return_on_fail value if conversion fails.
   """
   try:

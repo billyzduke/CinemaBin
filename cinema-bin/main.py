@@ -1,14 +1,13 @@
 import json
 import pandas as pd
 import pygsheets
-#import json
-#import macos_tags
 import os
-#import re
+import re
 import sys
 import time
 import util
 
+# --- CONFIG ---
 localDrive = '/Volumes/Moana'
 cb_path = 'DEVS/PERSONAL/CinemaBin'
 whereAmI = os.path.join(localDrive, cb_path)
@@ -17,10 +16,16 @@ localMovies = os.path.join(localDrive, movies_path)
 remote_access = True
 raw_sheet = "raw"
 pretty_sheet = "pretty"
+raw_columns = [
+  'Title', 'Year', 'Edition', 'Director', 
+  'Format', 'Resolution', 'Codec', 'Audio', 'Bit Depth', 
+  'Location', 'External Subtitles', 'Filename or ISBN', 'Duration', 'Files', 'Bonus Materials'
+]
 
 print("\n\n", 'CINEPHILES, SKIP THE TRAILERS! LET THE SYNC BEGIN!', "\n\n")
-print(f"It is {time.strftime("%A, %Y-%m-%d %H:%M:%S %Z (%z)", time.localtime())}")
+print(f"It is {time.strftime('%A, %Y-%m-%d %H:%M:%S %Z (%z)', time.localtime())}")
 
+# --- 1. CONNECT & LOAD (READ-ONLY FROM PRETTY) ---
 if remote_access:
   # Auth and Open 
   gc = pygsheets.authorize(service_file='credentials.json')
@@ -30,17 +35,16 @@ if remote_access:
 
   print("\n\n", 'SWEEPING THE THEATER!', "\n\n")
 
-  # Efficient Read
   df = wks.get_as_df(has_header=True)
   # df_xIDENTs = set(df['xIDENT'].dropna().unique())
 
-  if not df.empty:
+  if not df.empty and 'Title' in df.columns:
     df = df.dropna(subset=['Title'])
     dicTotals = df.iloc[0] # subheader/totals row
     rem_viddies = df.iloc[1:]
     df = df.drop(df.index[0])
 
-    # --- 1. SAFETY BACKUP --- / must allow some transforms so it matches raw sheet, not pretty
+    # --- SAFETY BACKUP ---
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     backup_filename = f"video_collection_{timestamp}.csv"
     backups_path = 'backups'
@@ -51,6 +55,7 @@ if remote_access:
     print("\n", dicTotals, "\n")
     remVidzCount = len(rem_viddies)
   else:
+    df = pd.DataFrame(columns=raw_columns)
     remVidzCount = 0
     
   print(f"Video Collection gsheet contains {remVidzCount} videos\n")
@@ -58,117 +63,175 @@ if remote_access:
 REMOTE_MOVIES_CHANGED = {'REMOTE MOVIES ADDED': {}, 'REMOTE MOVIES UPDATED': {}}
 
 # local_xIDENTs = []
-new_entries = []
-has_ext_subs = []
-# gather relevant info from local drive
-for root, subs, files in os.walk(localMovies):
-  if root.count('/') == 6: # Folder Categorization
+# --- 2. AGGREGATE LOCAL FILES (Handle Multi-Part Movies) ---
+# We scan everything first to group parts together.
+# Key = Unique Tuple (Title, Year, Edition, Resolution)
+local_inventory = {}
+has_ext_subs = {}
+
+# Regex to verify if a suffix is actually a 'part' tag
+# Matches: .2_of_2, .CD1, .Part1, .pt2 (case insensitive)
+pat_part_suffix = re.compile(r'^\.(?:cd|disc|disk|part|pt|\d+_of_)\d+$', re.IGNORECASE)
+
+print(f"Scanning: {localMovies}")
+
+for root, dirs, files in os.walk(localMovies):
+  if root.count('/') == 6: 
     folder_name = '/' + util.normalize_unicode(os.path.basename(root))
+    
     if str(folder_name) == '/untitled folder':
-      sys.exit("You've got an 'untitled folder' in your Movies directory. You need to get rid of that before we can proceed.")
+      sys.exit("Error: 'untitled folder' detected.")
       
-    # annoying but apparently necessary
-    files = util.remove_value_from_list(files, '.DS_Store') # have definitely had this issue
-    files = util.remove_value_from_list(files, 'Thumbs.db') # just to be safe
+    files = util.remove_value_from_list(files, '.DS_Store') 
+    files = util.remove_value_from_list(files, 'Thumbs.db') 
 
     for file in files:
-      filename = util.normalize_unicode(os.path.splitext(file)[0])
-      if file.endswith('.srt'):
-        has_ext_subs.append(filename)
-      else:
-        mdata_from_name = util.parse_filename(file)
-        mdata_from_name['Location'] = folder_name
-        mdata_from_name['Filename or ISBN'] = str(file)
+      filename, ext = os.path.splitext(file)
+      filename = util.normalize_unicode(filename)
+      
+      # CAPTURE SUB EXTENSIONS
+      if ext.lower() in ['.srt', '.sub', '.vtt', '.idx', '.ass']:   
+        has_ext_subs[filename] = os.path.splitext(file)[1]
+        
+        # We need to strip the part tag from subs too so they map to the movie!
+        # e.g. "Movie.Part1.srt" -> should map to "Movie"
+        clean_sub_name = filename
+        root_check, possible_part = os.path.splitext(filename)
+        if pat_part_suffix.match(possible_part):
+          clean_sub_name = root_check
+          
+        has_ext_subs[clean_sub_name] = ext
+        
+      elif ext.lower() in ['.mkv', '.mp4', '.avi', '.iso']:    # Parse
+        # --- THE DOUBLE SPLIT ---
+        # Check if we have a secondary extension like ".CD1" or ".2_of_2"
+        clean_filename = filename
+        root_check, possible_part = os.path.splitext(filename)
+        
+        if pat_part_suffix.match(possible_part):
+          # It is a part tag! Strip it.
+          # "Movie-2003...XVID.2_of_2" -> "Movie-2003...XVID"
+          clean_filename = root_check
 
-        # --- STRICT MATCHING LOGIC ---
-        # We filter for rows where ALL FOUR identifiers match the current file.
-        # We use .astype(str) to prevent type clashes (e.g. integer 2022 vs string "2022")
-        match_mask = (
-          (df['Title'].astype(str) == str(mdata_from_name['Title'])) & 
-          (df['Year'].astype(str) == str(mdata_from_name['Year'])) & 
-          (df['Edition'].astype(str) == str(mdata_from_name['Edition'])) & 
-          (df['Resolution'].astype(str) == str(mdata_from_name['Resolution']))
+        # Reconstruct a "clean" filename for the parser to read
+        # "Movie-2003...XVID" + ".mkv"
+        clean_file_for_parsing = clean_filename + ext
+        
+        # Parse the CLEAN filename (so the parser doesn't see ".2_of_2")
+        mdata = util.parse_filename(clean_file_for_parsing)
+                
+        # Add critical tracking data
+        mdata['Location'] = folder_name
+        mdata['Filename or ISBN'] = str(file)
+
+        # Create Unique ID for this movie (Groups Part 1 & Part 2)
+        unique_key = (
+          str(mdata['Title']), 
+          str(mdata['Year']), 
+          str(mdata['Edition']), 
+          str(mdata['Resolution'])
         )
-          
-        if match_mask.any():
-          # --- FOUND EXACT MATCH: UPDATE METADATA ---
-          # Since Title/Year/Edition/Res are identical, we only update the technical details
-          # that might have changed (e.g., you swapped an x264 encode for x265).
-          
-          idx = df.index[match_mask][0]
-          
-          # Columns we allow to be updated on a match
-          cols_to_update = ['Codec', 'Audio', 'Bit Depth', 'Director', 'Format', 'Filename or ISBN']
-          
-          for col in cols_to_update:
-            df.at[idx, col] = mdata_from_name[col]
 
-          REMOTE_MOVIES_CHANGED['REMOTE MOVIES UPDATED'][file] = mdata_from_name
+        if unique_key in local_inventory:
+          # FOUND ANOTHER PART OF AN EXISTING MOVIE
+          local_inventory[unique_key]['Files'] += 1
           
+          # Keep the alphabetically first filename (e.g. keep "Movie - Part 1.mkv")
+          current_file = local_inventory[unique_key]['Filename or ISBN']
+          if file < current_file:
+            local_inventory[unique_key]['Filename or ISBN'] = file
         else:
-          # --- NO MATCH: CREATE NEW ENTRY ---
-          # This happens if it's a new movie OR a new resolution/edition of an old movie.
-          
-          new_entries.append(mdata_from_name)
+          # FIRST TIME SEEING THIS MOVIE
+          mdata['Files'] = 1
+          local_inventory[unique_key] = mdata
 
-          REMOTE_MOVIES_CHANGED['REMOTE MOVIES ADDED'][file] = mdata_from_name
+print(f"Found {len(local_inventory)} unique movies locally.")
 
-# 3. Batch Append and Push
+# --- 3. SYNC TO SHEET ---
+new_entries = []
+
+for mdata in local_inventory.values():
+  # Strict Match Logic
+  match_mask = (
+    (df['Title'].astype(str) == str(mdata['Title'])) & 
+    (df['Year'].astype(str) == str(mdata['Year'])) & 
+    (df['Edition'].astype(str) == str(mdata['Edition'])) & 
+    (df['Resolution'].astype(str) == str(mdata['Resolution']))
+  )
+    
+  if match_mask.any():
+    # --- UPDATE EXISTING ---
+    idx = df.index[match_mask][0]
+    
+    # Added 'Files' and 'Filename or ISBN' to update list
+    cols_to_update = [
+      'Codec', 'Audio', 'Bit Depth', 'Director', 
+      'Format', 'Location', 'Filename or ISBN', 'Files'
+    ]
+    
+    for col in cols_to_update:
+      if col in mdata:
+        df.at[idx, col] = mdata[col]
+
+    REMOTE_MOVIES_CHANGED['REMOTE MOVIES UPDATED'][mdata['Filename or ISBN']] = mdata
+    
+  else:
+    # --- ADD NEW ---
+    new_entries.append(mdata)
+    REMOTE_MOVIES_CHANGED['REMOTE MOVIES ADDED'][mdata['Filename or ISBN']] = mdata
+
+# --- 4. MERGE & WRITE ---
 if new_entries:
   new_df = pd.DataFrame(new_entries)
   df = pd.concat([df, new_df], ignore_index=True)
-  
-  # Optional: Sort by Title so the new additions don't just sit at the bottom
+
+if not df.empty:
+  # Sort
   df = df.sort_values(by=['Title', 'Year'])
 
-  df['Subtitles'] = df['Filename or ISBN'].isin(has_ext_subs).map({True: 'Yes', False: 'No'})
-  
-  # --- CLEANUP: FILL NaNs ---
-  # 1. Fill missing Subtitles with "No" (safer than leaving them blank)
-  df['External Subtitles'] = df['External Subtitles'].fillna('No')
-
-  # 2. Fill missing Filenames with empty strings (so they don't look like errors)
-  df['Filename or ISBN'] = df['Filename or ISBN'].fillna('')
-  
-  # 3. (Optional) Scrub the whole dataframe to be safe
-  # This catches any random NaNs in Director, Codec, etc.
+  # Cleanup NaNs (Critical for Filename logic)
   df = df.fillna('')
-  # Define your "Master" column order
-  desired_order = [
-    'Title', 'Year', 'Edition', 'Director', 
-    'Format', 'Resolution', 'Codec', 'Audio', 'Bit Depth', 
-    'Location', 'External Subtitles', 'Filename or ISBN',
-    'Duration'
-  ]
-
-  # 1. Reorder the DataFrame columns to match
-  # (This ensures 'Resolution' is always column F, etc.)
-  df = df[desired_order]
   
+  # Ensure 'Files' column exists for old data
+  if 'Files' not in df.columns:
+    df['Files'] = 1
+  else:
+    # Make sure we don't have empty strings in Files column
+    df['Files'] = pd.to_numeric(df['Files'], errors='coerce').fillna(1)
+
+  # Look up the extension based on the movie filename (without extension)
+  df['External Subtitles'] = df['Filename or ISBN'].apply(
+    lambda x: has_ext_subs.get(util.normalize_unicode(os.path.splitext(x)[0]), "").lstrip('.')
+  )
+
+  # Reindex
+  df = df.reindex(columns=raw_columns)
+  
+  # Remove tail if it's junk (legacy logic)
   has_tail = True
-  while has_tail:
+  while has_tail and len(df) > 0:
     tail = df.tail(1).iloc[0]
+    # Check if Title is valid (adjust logic as needed for your data)
     if util.safe_str_to_int(tail['Title'], tail['Title']) == util.safe_str_to_int(tail['Title']):
       df = df.iloc[:-1]
     else:
       has_tail = False
 
+  # Write to RAW Sheet (Clear & Write)
   try:
     xwks = sh.worksheet_by_title(raw_sheet)
     xwks.clear() 
     print(f"Cleared existing '{raw_sheet}' sheet.")
   except pygsheets.WorksheetNotFound:
-    xwks = sh.add_worksheet(raw_sheet, rows=100, cols=12)
+    xwks = sh.add_worksheet(raw_sheet, rows=len(df)+50, cols=26)
     print(f"Created fresh raw data sheet: {raw_sheet}\n")
 
   xwks.set_dataframe(df, start='A1', copy_head=True, fit=True)
+  print(f"Successfully wrote {len(df)} rows.")
+  print(f"Added {len(new_entries)} new entries.")
 
-  print(f"Added {len(new_entries)} entries.")
 else:
-  print("No new entries found.")
-  
-print(f"Successfully updated {len(df)} rows in a single batch.")
+  print("No entries to process.")
   
 print(json.dumps(REMOTE_MOVIES_CHANGED, indent=2, default=str))
-
-print("\n\n", f"MOVIES LIST SYNC COMPLETE @ {time.strftime("%Y-%m-%d %H:%M:%S %Z (%z)", time.localtime())}", "\n\n")
+print("\n\n", f"SYNC COMPLETE @ {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", "\n\n")

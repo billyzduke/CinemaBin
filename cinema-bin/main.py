@@ -21,6 +21,7 @@ raw_columns = [
   'Format', 'Resolution', 'Codec', 'Audio', 'Bit Depth', 
   'Location', 'External Subtitles', 'Filename or ISBN', 'Duration', 'Files', 'Bonus Materials'
 ]
+force_clear = False
 
 print("\n\n", 'CINEPHILES, SKIP THE TRAILERS! LET THE SYNC BEGIN!', "\n\n")
 print(f"It is {time.strftime('%A, %Y-%m-%d %H:%M:%S %Z (%z)', time.localtime())}")
@@ -31,7 +32,11 @@ if remote_access:
   gc = pygsheets.authorize(service_file='credentials.json')
   sh = gc.open_by_key('1YM1bmps-gyKsHJk5B9iZv2WfiOCTZDuTDGS7_x2rov8')
   # sh = gc.open('Video Collection')
-  wks = sh.worksheet_by_title(pretty_sheet) 
+  if force_clear:
+    wks = sh.worksheet_by_title(raw_sheet)
+    wks.clear() 
+  else: 
+    wks = sh.worksheet_by_title(pretty_sheet)
 
   print("\n\n", 'SWEEPING THE THEATER!', "\n\n")
 

@@ -15,7 +15,7 @@ def decode_safe_filename(filename):
   filename = filename.replace('±', '*')
   filename = filename.replace('÷', ': ')
   filename = filename.replace("''", '"')
-  filename = filename.replace('&', ' & ')
+  #filename = filename.replace('&', ' & ')
   return filename.strip()
 
 def get_video_details(filepath):
@@ -91,61 +91,76 @@ def parse_filename(filename):
     edition = parts[year_index + 1]
     dir_start = year_index + 2
 
-  # --- 3. FIND RESOLUTION (The Secondary Anchor) ---
-  res_index = -1
-  pat_res = re.compile(r'^(\d{3,4}p|4K|8K|SD)$', re.IGNORECASE)
+  # --- 3. FIND TECH START (Boundary Detection) ---
+  # We look for ANY technical tag to stop the Director scanner.
+  tech_start_index = -1
 
+  # REGEX FIX: Added [hx] to catch x264/x265, and added hevc
+  pat_res = re.compile(r'^(\d{3,4}p|4K|8K|SD)$', re.IGNORECASE)
+  pat_codec_broad = re.compile(r'^([hx][\.\-_]?26[45]|hevc|xvid|avc)$', re.IGNORECASE)
+  pat_audio_broad = re.compile(r'^(AAC|AC|DD|DDP|DTS|TrueHD|FLAC|MP3|PCM|Opus)', re.IGNORECASE)
+  pat_bitdepth_broad = re.compile(r'^\d+bit$', re.IGNORECASE)
+  
   for i in range(dir_start, len(parts)):
-    if pat_res.match(parts[i]):
-      res_index = i
+    part = parts[i]
+    
+    if (pat_res.match(part) or 
+        pat_codec_broad.match(part) or 
+        pat_bitdepth_broad.match(part) or
+        pat_audio_broad.match(part)):
+      tech_start_index = i
       break
   
-  if res_index == -1:
+  if tech_start_index == -1:
     director_parts = parts[dir_start:]
     bag_of_tags = []
-    resolution_val = ""
   else:
-    director_parts = parts[dir_start:res_index]
-    resolution_val = parts[res_index]
-    bag_of_tags = parts[res_index+1:]
+    director_parts = parts[dir_start:tech_start_index]
+    bag_of_tags = parts[tech_start_index:]
 
   # --- 4. PROCESS THE BAG OF TAGS ---
   data = {
-    "Resolution": resolution_val,
+    "Resolution": "",
     "Codec": "",
     "Audio": "",
     "Bit Depth": ""
   }
   
   # Regex Definitions
-  pat_codec    = re.compile(r'^(h[\.\-_]?26[45]|xvid|avc)$', re.IGNORECASE)
-  pat_audio    = re.compile(r'^(AAC|AC|DD|DDP|DTS|TrueHD|FLAC|MP3|PCM|Opus).*', re.IGNORECASE)
+  pat_res = re.compile(r'^(\d{3,4}p|4K|8K|SD)$', re.IGNORECASE)
+  pat_codec = re.compile(r'^([hx]26[45]|hevc|xvid|avc)$', re.IGNORECASE)
+  pat_audio = re.compile(r'^(AAC|AC|DD|DDP|DTS|TrueHD|FLAC|MP3|PCM|Opus)', re.IGNORECASE)
   pat_channels = re.compile(r'^(\d+)ch$', re.IGNORECASE)
   pat_bitdepth = re.compile(r'^\d+bit$', re.IGNORECASE) # Matches "10bit"
 
   # Temporary holders to avoid overwriting
   found_audio_codec = ""
   found_audio_channels = ""
+  unknown_tags = []
 
   for tag in bag_of_tags:
     lower_tag = tag.lower()
 
-    # A. CODEC
-    if pat_codec.match(lower_tag):
+    # VIDEO RESOLUTION
+    if pat_res.match(lower_tag):
+      data["Resolution"] = lower_tag
+    
+    # VIDEO CODEC
+    elif pat_codec.match(lower_tag):
       if "xvid" in lower_tag:
         data["Codec"] = "XVID"
-      elif "265" in lower_tag:
+      elif "265" in lower_tag or "hevc" in lower_tag:
         data["Codec"] = "x265"
       else:
-        data["Codec"] = "x264" # Normalizes h264, avc, etc.
+        data["Codec"] = "x264"
 
-    # B. BIT DEPTH (Video)
+    # BIT DEPTH (Video)
     elif pat_bitdepth.match(lower_tag):
       data["Bit Depth"] = lower_tag.replace('bit', '').strip()
 
-    # C. AUDIO CODEC (e.g. AAC, DTS)
+    # AUDIO CODEC (e.g. AAC, DTS)
     elif pat_audio.match(lower_tag):
-      found_audio_codec = lower_tag
+      found_audio_codec = lower_tag.upper()
 
     # D. AUDIO CHANNELS (e.g. 6CH, 2CH)
     elif pat_channels.match(lower_tag):
@@ -158,7 +173,12 @@ def parse_filename(filename):
         found_audio_channels = "2.0"
       elif ch_num == 1:
         found_audio_channels = "1.0"
-
+        
+    # UNKNOWN TAGS
+    else:
+      if len(lower_tag) > 1:
+        unknown_tags.append(lower_tag)
+      
   # --- MERGE AUDIO LOGIC ---
   # Combine codec and channels (e.g., "AAC" + "5.1" -> "AAC 5.1")
   # Check if codec string already has the channel info (e.g. "DD5.1") to avoid "DD5.1 5.1"
@@ -166,6 +186,15 @@ def parse_filename(filename):
     data["Audio"] = f"{found_audio_codec} {found_audio_channels}".strip()
   else:
     data["Audio"] = found_audio_codec
+    
+  # --- 5. FINALIZE DIRECTOR ---
+  final_director_parts = director_parts
+  
+  # Rescue unknown tags if director was empty
+  if not final_director_parts and unknown_tags:
+      final_director_parts = unknown_tags
+
+  director_string = "-".join(final_director_parts).replace("_", " ").replace("+", " & ")
 
   # --- 5. TRANSLATE EDITION CODES ---
   edition_map = {
@@ -186,7 +215,7 @@ def parse_filename(filename):
     "Title": "-".join(parts[:title_end]).replace("_", " "),
     "Year": parts[year_index],
     "Edition": clean_edition,
-    "Director": "-".join(director_parts).replace("_", " "),
+    "Director": director_string,
     "Format": extension.lstrip('.'),
     **data
   }
